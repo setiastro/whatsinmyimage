@@ -1,0 +1,19 @@
+LINUX
+pyinstaller --onefile --noconfirm --icon=wimi_icon_256x256.png \
+--add-data "/home/setiastroadmin/Desktop/cosmicclarity/env/lib/python3.8/site-packages/astroquery/CITATION:astroquery" \
+--add-data "wrench_icon.png:." \
+--add-data "eye.png:." \
+--add-data "disk.png:." \
+--add-data "nuke.png:." \
+--add-data "hubble.png:." \
+--add-data "collage.png:." \
+--add-data "annotated.png:." \
+--add-data "colorwheel.png:." \
+--add-data "font.png:." \
+--add-data "spinner.gif:." \
+--add-data "cvs.png:." \
+--add-data "/home/setiastroadmin/Desktop/cosmicclarity/env/lib/python3.8/site-packages/astroquery/simbad/data:astroquery/simbad/data" \
+--add-data "/home/setiastroadmin/Desktop/cosmicclarity/env/lib/python3.8/site-packages/astropy/CITATION:astropy" \
+--exclude-module torch \
+--exclude-module torchvision \
+whatsinmyimage.py
