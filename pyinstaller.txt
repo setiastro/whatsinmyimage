@@ -1,5 +1,5 @@
 LINUX
-pyinstaller --onefile --noconfirm --icon=wimi_icon_256x256.png \
+pyinstaller --onefile --noconfirm --icon=astrosuite.icns \
 --add-data "/home/setiastroadmin/Desktop/cosmicclarity/env/lib/python3.8/site-packages/astroquery/CITATION:astroquery" \
 --add-data "wrench_icon.png:." \
 --add-data "eye.png:." \
@@ -16,10 +16,10 @@ pyinstaller --onefile --noconfirm --icon=wimi_icon_256x256.png \
 --add-data "/home/setiastroadmin/Desktop/cosmicclarity/env/lib/python3.8/site-packages/astropy/CITATION:astropy" \
 --exclude-module torch \
 --exclude-module torchvision \
-whatsinmyimage.py
+setiastrosuitemac.py
 
 MACOS
-pyinstaller --onefile --noconfirm --icon=wimi.icns \
+pyinstaller --onefile --noconfirm --icon=/Users/franklinmarek/cosmicclarity/wimi.icns \
 --add-data "/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/astroquery/CITATION:astroquery" \
 --add-data "wrench_icon.png:." \
 --add-data "eye.png:." \
@@ -36,4 +36,5 @@ pyinstaller --onefile --noconfirm --icon=wimi.icns \
 --add-data "/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/astropy/CITATION:astropy" \
 --exclude-module torch \
 --exclude-module torchvision \
+--windowed \
 whatsinmyimage.py
