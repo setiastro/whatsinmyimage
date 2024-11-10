@@ -1,7 +1,13 @@
 import os
 import json
+from xisf import XISF
 import requests
 import csv
+import lz4.block
+import zstandard
+import base64
+import ast
+import platform
 import cv2
 import numpy as np
 from PyQt5.QtWidgets import (
@@ -320,8 +326,51 @@ def load_image(filename):
         bit_depth = None
         is_mono = True
         original_header = None
+                # Debugging: Print detected file extension
+        print(f"Loading file: {filename}, Detected extension: {file_extension}")
 
-        if file_extension in ['tif', 'tiff']:
+
+        # Load XISF files
+        if file_extension == 'xisf':
+            xisf = XISF(filename)
+            im_data = xisf.read_image(0)
+
+            # Load XISF metadata
+            file_meta = xisf.get_file_metadata()
+            image_meta = xisf.get_images_metadata()[0]
+            print(f"Loaded XISF image with metadata: {file_meta}")
+
+            # Determine bit depth and normalize
+            if im_data.dtype == np.uint16:
+                im_data = im_data.astype(np.float32) / 65535.0
+                bit_depth = "16-bit"
+            elif im_data.dtype == np.uint32:
+                im_data = im_data.astype(np.float32) / 4294967295.0
+                bit_depth = "32-bit unsigned"
+            elif im_data.dtype == np.float32 or im_data.dtype == np.float64:
+                im_data = np.clip(im_data, 0, 1)  # No normalization needed for 32-bit float
+                bit_depth = "32-bit floating point"
+            else:
+                im_data = im_data.astype(np.float32)
+                bit_depth = str(im_data.dtype)
+
+            # Convert grayscale images to 3-channel for display consistency
+            if len(im_data.shape) == 2:
+                im_data = np.stack([im_data] * 3, axis=-1)  # Convert to RGB format for consistency
+                is_mono = True
+            elif im_data.shape[2] == 1:
+                im_data = np.squeeze(im_data, axis=2)  # Remove singleton channel if grayscale
+                im_data = np.stack([im_data] * 3, axis=-1)
+                is_mono = True
+            else:
+                is_mono = False  # Assume RGB for 3-channel
+
+            # Capture the XISF metadata for further processing or display
+            original_header = {"XISF": file_meta, "ImageMetadata": image_meta}
+
+            return im_data, original_header, bit_depth, is_mono
+        
+        elif file_extension in ['tif', 'tiff']:
             image = tiff.imread(filename)
             print(f"Loaded TIFF image with dtype: {image.dtype}")
             
@@ -404,6 +453,7 @@ def load_image(filename):
                         print(f"Image range after applying BZERO and BSCALE (2D case): min={image_min}, max={image_max}")
 
                     elif bit_depth == "32-bit floating point":
+                        print(f"Mono 32bit float point FITS Loaded")
                         image = image_data  # No normalization needed for 32-bit float
 
                     is_mono = True
@@ -1427,7 +1477,7 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 1200, 800)
         # Track the theme status
         self.is_dark_mode = True
-
+        self.metadata = {}
         self.circle_center = None
         self.circle_radius = 0    
         self.show_names = False  # Boolean to toggle showing names on the main image
@@ -1441,7 +1491,7 @@ class MainWindow(QMainWindow):
         left_panel = QVBoxLayout()
 
         # Create the instruction QLabel for search region
-        self.title_label = QLabel("What's In My Image V1.0")
+        self.title_label = QLabel("What's In My Image V1.1")
         self.title_label.setAlignment(Qt.AlignCenter)
         self.title_label.setStyleSheet("font-size: 20px; color: lightgrey;")    
         left_panel.addWidget(self.title_label)    
@@ -2415,7 +2465,7 @@ class MainWindow(QMainWindow):
     
 
     def open_image(self):
-        self.image_path, _ = QFileDialog.getOpenFileName(self, "Open Image", "", "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fit *.fits)")
+        self.image_path, _ = QFileDialog.getOpenFileName(self, "Open Image", "", "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fit *.fits *.xisf)")
         if self.image_path:
             img_array, original_header, bit_depth, is_mono = load_image(self.image_path)
             if img_array is not None:
@@ -2485,10 +2535,146 @@ class MainWindow(QMainWindow):
                         except ValueError as e:
                             print("Error initializing WCS:", e)
                             QMessageBox.warning(self, "WCS Error", "Failed to load WCS data from FITS header.")
+                elif self.image_path.lower().endswith('.xisf'):
+                    # Load WCS from XISF properties
+                    xisf_meta = self.extract_xisf_metadata(self.image_path)
+                    self.metadata = xisf_meta  # Ensure metadata is stored in self.metadata for later use
+
+                    # Construct WCS header from XISF properties
+                    header = self.construct_fits_header_from_xisf(xisf_meta)
+                    if header:
+                        try:
+                            self.initialize_wcs_from_header(header)
+                        except ValueError as e:
+                            print("Error initializing WCS from XISF:", e)
+                            QMessageBox.warning(self, "WCS Error", "Failed to load WCS data from XISF properties.")
                 else:
                     # For non-FITS images (e.g., JPEG, PNG), prompt directly for a blind solve
                     self.prompt_blind_solve()
 
+    def extract_xisf_metadata(self, xisf_path):
+        """
+        Extract metadata from a .xisf file, focusing on WCS and essential image properties.
+        """
+        try:
+            # Load the XISF file
+            xisf = XISF(xisf_path)
+            
+            # Extract file and image metadata
+            self.file_meta = xisf.get_file_metadata()
+            self.image_meta = xisf.get_images_metadata()[0]  # Get metadata for the first image
+            return self.image_meta
+        except Exception as e:
+            print(f"Error reading XISF metadata: {e}")
+            return None
+
+    def initialize_wcs_from_header(self, header):
+        """ Initialize WCS data from a FITS header or constructed XISF header """
+        try:
+            # Use only the first two dimensions for WCS
+            self.wcs = WCS(header, naxis=2, relax=True)
+            
+            # Calculate and set pixel scale
+            pixel_scale_matrix = self.wcs.pixel_scale_matrix
+            self.pixscale = np.sqrt(pixel_scale_matrix[0, 0]**2 + pixel_scale_matrix[1, 0]**2) * 3600  # arcsec/pixel
+            self.center_ra, self.center_dec = self.wcs.wcs.crval
+            self.wcs_header = self.wcs.to_header(relax=True)  # Store the full WCS header, including non-standard keywords
+            self.print_corner_coordinates()
+            
+            # Display WCS information
+            if 'CROTA2' in header:
+                self.orientation = header['CROTA2']
+            else:
+                self.orientation = calculate_orientation(header)
+                if self.orientation is None:
+                    print("Orientation: CD matrix elements not found in WCS header.")
+
+            if self.orientation is not None:
+                print(f"Orientation: {self.orientation:.2f}°")
+                self.orientation_label.setText(f"Orientation: {self.orientation:.2f}°")
+            else:
+                self.orientation_label.setText("Orientation: N/A")
+
+            print(f"WCS data loaded from header: RA={self.center_ra}, Dec={self.center_dec}, Pixel Scale={self.pixscale} arcsec/px")
+        except ValueError as e:
+            raise ValueError(f"WCS initialization error: {e}")
+
+    def construct_fits_header_from_xisf(self, xisf_meta):
+        """ Convert XISF metadata to a FITS header compatible with WCS """
+        header = fits.Header()
+
+        # Define WCS keywords to populate
+        wcs_keywords = ["CTYPE1", "CTYPE2", "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CDELT1", "CDELT2", 
+                        "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
+
+        # Populate WCS and FITS keywords
+        if 'FITSKeywords' in xisf_meta:
+            for keyword, values in xisf_meta['FITSKeywords'].items():
+                for entry in values:
+                    if 'value' in entry:
+                        value = entry['value']
+                        if keyword in wcs_keywords:
+                            try:
+                                value = int(value)
+                            except ValueError:
+                                value = float(value)
+                        header[keyword] = value
+
+        # Manually add WCS information if missing
+        header.setdefault('CTYPE1', 'RA---TAN')
+        header.setdefault('CTYPE2', 'DEC--TAN')
+
+        # Add SIP distortion suffix if SIP coefficients are present
+        if any(key in header for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]):
+            header['CTYPE1'] = 'RA---TAN-SIP'
+            header['CTYPE2'] = 'DEC--TAN-SIP'
+
+        # Set default reference pixel to the center of the image
+        header.setdefault('CRPIX1', self.image_data.shape[1] / 2)
+        header.setdefault('CRPIX2', self.image_data.shape[0] / 2)
+
+        # Retrieve RA and DEC values if available
+        if 'RA' in xisf_meta['FITSKeywords']:
+            header['CRVAL1'] = float(xisf_meta['FITSKeywords']['RA'][0]['value'])  # Reference RA
+        if 'DEC' in xisf_meta['FITSKeywords']:
+            header['CRVAL2'] = float(xisf_meta['FITSKeywords']['DEC'][0]['value'])  # Reference DEC
+
+        # Calculate pixel scale if focal length and pixel size are available
+        if 'FOCALLEN' in xisf_meta['FITSKeywords'] and 'XPIXSZ' in xisf_meta['FITSKeywords']:
+            focal_length = float(xisf_meta['FITSKeywords']['FOCALLEN'][0]['value'])  # in mm
+            pixel_size = float(xisf_meta['FITSKeywords']['XPIXSZ'][0]['value'])  # in μm
+            pixel_scale = (pixel_size * 206.265) / focal_length  # arcsec/pixel
+            header['CDELT1'] = -pixel_scale / 3600.0
+            header['CDELT2'] = pixel_scale / 3600.0
+        else:
+            header['CDELT1'] = -2.77778e-4  # ~1 arcsecond/pixel
+            header['CDELT2'] = 2.77778e-4
+
+        # Populate CD matrix using the XISF LinearTransformationMatrix if available
+        if 'XISFProperties' in xisf_meta and 'PCL:AstrometricSolution:LinearTransformationMatrix' in xisf_meta['XISFProperties']:
+            linear_transform = xisf_meta['XISFProperties']['PCL:AstrometricSolution:LinearTransformationMatrix']['value']
+            header['CD1_1'] = linear_transform[0][0]
+            header['CD1_2'] = linear_transform[0][1]
+            header['CD2_1'] = linear_transform[1][0]
+            header['CD2_2'] = linear_transform[1][1]
+        else:
+            # Use pixel scale for CD matrix if no linear transformation is defined
+            header['CD1_1'] = header['CDELT1']
+            header['CD1_2'] = 0.0
+            header['CD2_1'] = 0.0
+            header['CD2_2'] = header['CDELT2']
+
+        # Ensure numeric types for SIP distortion keywords if present
+        sip_keywords = ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
+        for sip_key in sip_keywords:
+            if sip_key in xisf_meta['XISFProperties']:
+                try:
+                    value = xisf_meta['XISFProperties'][sip_key]['value']
+                    header[sip_key] = int(value) if isinstance(value, str) and value.isdigit() else float(value)
+                except ValueError:
+                    pass  # Ignore any invalid conversion
+
+        return header
 
     def print_corner_coordinates(self):
         """Print the RA/Dec coordinates of the four corners of the image for debugging purposes."""
@@ -2737,8 +2923,32 @@ class MainWindow(QMainWindow):
         except Exception as e:
             raise Exception("Login to Astrometry.net failed: " + str(e))
 
+
     def upload_image_to_astrometry(self, image_path, session_key):
         try:
+            # Check if the file is XISF format
+            file_extension = os.path.splitext(image_path)[-1].lower()
+            if file_extension == ".xisf":
+                # Load the XISF image
+                xisf = XISF(image_path)
+                im_data = xisf.read_image(0)
+                
+                # Convert to a temporary TIFF file for upload
+                temp_image_path = os.path.splitext(image_path)[0] + "_converted.tif"
+                if im_data.dtype == np.float32 or im_data.dtype == np.float64:
+                    im_data = np.clip(im_data, 0, 1) * 65535
+                im_data = im_data.astype(np.uint16)
+
+                # Save as TIFF
+                if im_data.shape[-1] == 1:  # Grayscale
+                    tiff.imwrite(temp_image_path, np.squeeze(im_data, axis=-1))
+                else:  # RGB
+                    tiff.imwrite(temp_image_path, im_data)
+
+                print(f"Converted XISF file to TIFF at {temp_image_path} for upload.")
+                image_path = temp_image_path  # Use the converted file for upload
+
+            # Upload the image file
             with open(image_path, 'rb') as image_file:
                 files = {'file': image_file}
                 data = {
@@ -2755,8 +2965,16 @@ class MainWindow(QMainWindow):
                     return response_data["subid"]
                 else:
                     raise ValueError("Image upload failed: " + response_data.get("error", "Unknown error"))
+
         except Exception as e:
             raise Exception("Image upload to Astrometry.net failed: " + str(e))
+
+        finally:
+            # Clean up temporary file if created
+            if file_extension == ".xisf" and os.path.exists(temp_image_path):
+                os.remove(temp_image_path)
+                print(f"Temporary TIFF file {temp_image_path} deleted after upload.")
+
 
 
     def poll_submission_status(self, subid):
