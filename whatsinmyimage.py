@@ -13,7 +13,7 @@ import numpy as np
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QWidget, QLabel, QPushButton, QHBoxLayout, QFileDialog, QGraphicsView,
     QGraphicsScene, QMessageBox, QInputDialog, QTreeWidget, QTreeWidgetItem, QCheckBox, QGraphicsTextItem, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QGridLayout, QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem,
-    QGraphicsPathItem, QColorDialog, QFontDialog, QStyle
+    QGraphicsPathItem, QColorDialog, QFontDialog, QStyle, QMenu, QAction, QComboBox
 )
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen, QColor, QTransform, QIcon, QPainterPath, QFont
 from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF
@@ -484,7 +484,8 @@ class CustomGraphicsView(QGraphicsView):
         self.start_pos = None     
         self.annotation_items = []  # Store annotation items  
         self.drawing_measurement = False
-        self.measurement_start = QPointF()     
+        self.measurement_start = QPointF()    
+         
 
         self.selected_object = None  # Initialize selected_object to None
         self.show_names = False 
@@ -1123,6 +1124,22 @@ class CustomGraphicsView(QGraphicsView):
             }
         ))
 
+    def zoom_to_coordinates(self, ra, dec):
+        """Zoom to the specified RA/Dec coordinates and center the view on that position."""
+        # Calculate the pixel position from RA and Dec
+        pixel_x, pixel_y = self.parent.calculate_pixel_from_ra_dec(ra, dec)
+        
+        if pixel_x is not None and pixel_y is not None:
+            # Center the view on the calculated pixel position
+            self.centerOn(pixel_x, pixel_y)
+            
+            # Reset the zoom level to 1.0 by adjusting the transformation matrix
+            self.resetTransform()
+            self.scale(1.0, 1.0)
+
+            # Optionally, update the mini preview to reflect the new zoom and center
+            self.update_mini_preview()
+
     def draw_query_results(self):
         """Draw query results with or without names based on the show_names setting."""
         if self.parent.main_image:
@@ -1214,25 +1231,33 @@ class CustomGraphicsView(QGraphicsView):
                     text_east.setDefaultTextColor(Qt.blue)
                     self.parent.main_scene.addItem(text_east)                               
             # Ensure the search circle is drawn if circle data is available
-            if self.circle_center is not None and self.circle_radius > 0:
-                self.update_circle()
+            #if self.circle_center is not None and self.circle_radius > 0:
+            #    self.update_circle()
 
-            # Draw object annotations
+            # Draw object markers (circle or crosshair)
             for obj in self.parent.results:
                 ra, dec, name = obj["ra"], obj["dec"], obj["name"]
                 x, y = self.parent.calculate_pixel_from_ra_dec(ra, dec)
                 if x is not None and y is not None:
-                    # Use green color if this is the selected object, otherwise use red
+                    # Determine color: green if selected, red otherwise
                     pen_color = QColor(0, 255, 0) if obj == self.selected_object else QColor(255, 0, 0)
                     pen = QPen(pen_color, 2)
-                    self.parent.main_scene.addEllipse(int(x - 5), int(y - 5), 10, 10, pen)
 
-                    # Conditionally draw names if the checkbox is checked
-                    if self.parent.show_names:
-                        text_item = QGraphicsTextItem(name)
-                        text_item.setPos(x + 10, y + 10)
-                        text_item.setDefaultTextColor(QColor(255, 255, 0))  # Set text color to white
-                        self.parent.main_scene.addItem(text_item)
+                    if self.parent.marker_style == "Circle":
+                        # Draw a circle around the object
+                        self.parent.main_scene.addEllipse(int(x - 5), int(y - 5), 10, 10, pen)
+                    elif self.parent.marker_style == "Crosshair":
+                        # Draw crosshair with a 5-pixel gap in the middle
+                        crosshair_size = 10
+                        gap = 5
+                        line1 = QLineF(x - crosshair_size, y, x - gap, y)
+                        line2 = QLineF(x + gap, y, x + crosshair_size, y)
+                        line3 = QLineF(x, y - crosshair_size, x, y - gap)
+                        line4 = QLineF(x, y + gap, x, y + crosshair_size)
+                        for line in [line1, line2, line3, line4]:
+                            crosshair_item = QGraphicsLineItem(line)
+                            crosshair_item.setPen(pen)
+                            self.parent.main_scene.addItem(crosshair_item)
     
 
     def clear_query_results(self):
@@ -1483,6 +1508,7 @@ class MainWindow(QMainWindow):
         self.show_names = False  # Boolean to toggle showing names on the main image
         self.max_results = 100  # Default maximum number of query results     
         self.current_tool = None  # Track the active annotation tool
+        self.marker_style = "Circle" 
             
 
         main_layout = QHBoxLayout()
@@ -1491,7 +1517,7 @@ class MainWindow(QMainWindow):
         left_panel = QVBoxLayout()
 
         # Create the instruction QLabel for search region
-        self.title_label = QLabel("What's In My Image V1.1")
+        self.title_label = QLabel("What's In My Image V1.2")
         self.title_label.setAlignment(Qt.AlignCenter)
         self.title_label.setStyleSheet("font-size: 20px; color: lightgrey;")    
         left_panel.addWidget(self.title_label)    
@@ -1678,13 +1704,30 @@ class MainWindow(QMainWindow):
         self.main_preview.verticalScrollBar().valueChanged.connect(self.main_preview.update_mini_preview)
         self.main_preview.horizontalScrollBar().valueChanged.connect(self.main_preview.update_mini_preview)
 
-        # Tree Widget for results
+        # Create a horizontal layout for the labels
+        label_layout = QHBoxLayout()
+
+        # Create the label to display the count of objects
+        self.object_count_label = QLabel("Objects Found: 0")
+
+        # Create the label with instructions
+        self.instructions_label = QLabel("Right Click a Row for More Options")
+
+        # Add both labels to the horizontal layout
+        label_layout.addWidget(self.object_count_label)
+        label_layout.addWidget(self.instructions_label)
+
+        # Add the horizontal layout to the main panel layout
+        right_panel.addLayout(label_layout)
+
         self.results_tree = QTreeWidget()
         self.results_tree.setHeaderLabels(["RA", "Dec", "Name", "Diameter", "Type", "Long Type", "Redshift", "Comoving Radial Distance (GLy)"])
         self.results_tree.setFixedHeight(150)
+        self.results_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.results_tree.customContextMenuRequested.connect(self.open_context_menu)
         self.results_tree.itemClicked.connect(self.on_tree_item_clicked)
-        self.results_tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked) 
-        self.results_tree.setSortingEnabled(True)  # <-- Add this line
+        self.results_tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked)
+        self.results_tree.setSortingEnabled(True)
         right_panel.addWidget(self.results_tree)
 
         self.annotation_buttons = []
@@ -1862,6 +1905,53 @@ class MainWindow(QMainWindow):
 
         # Initialize the dark theme
         self.apply_light_theme()
+
+    def update_object_count(self):
+        count = self.results_tree.topLevelItemCount()
+        self.object_count_label.setText(f"Objects Found: {count}")
+
+    def open_context_menu(self, position):
+        
+        # Get the item at the mouse position
+        item = self.results_tree.itemAt(position)
+        if not item:
+            return  # If no item is clicked, do nothing
+        
+        self.on_tree_item_clicked(item)
+
+        # Create the context menu
+        menu = QMenu(self)
+
+        # Define actions
+        open_website_action = QAction("Open Website", self)
+        open_website_action.triggered.connect(lambda: self.results_tree.itemDoubleClicked.emit(item, 0))
+        menu.addAction(open_website_action)
+
+        zoom_to_object_action = QAction("Zoom to Object", self)
+        zoom_to_object_action.triggered.connect(lambda: self.zoom_to_object(item))
+        menu.addAction(zoom_to_object_action)
+
+        copy_info_action = QAction("Copy Object Information", self)
+        copy_info_action.triggered.connect(lambda: self.copy_object_information(item))
+        menu.addAction(copy_info_action)
+
+        # Display the context menu at the cursor position
+        menu.exec_(self.results_tree.viewport().mapToGlobal(position))
+
+
+
+    def zoom_to_object(self, item):
+        """Zoom to the object in the main preview."""
+        ra = float(item.text(0))  # Assuming RA is in the first column
+        dec = float(item.text(1))  # Assuming Dec is in the second column
+        self.main_preview.zoom_to_coordinates(ra, dec)
+        
+
+    def copy_object_information(self, item):
+        """Copy object information to the clipboard."""
+        info = f"RA: {item.text(0)}, Dec: {item.text(1)}, Name: {item.text(2)}, Diameter: {item.text(3)}, Type: {item.text(4)}"
+        clipboard = QApplication.clipboard()
+        clipboard.setText(info)
 
     def set_tool(self, tool_name):
         """Sets the current tool and updates button states."""
@@ -2232,7 +2322,7 @@ class MainWindow(QMainWindow):
         self.circle_radius = radius_px  # Set this to allow the check in `query_simbad`
 
         # Perform the query with the calculated radius
-        self.query_simbad(radius_deg, max_results=25000)
+        self.query_simbad(radius_deg, max_results=100000)
 
 
 
@@ -3256,6 +3346,7 @@ class MainWindow(QMainWindow):
             # Set query results in the CustomGraphicsView for display
             self.main_preview.set_query_results(query_results)
             self.query_results = query_results  # Keep a reference to results in MainWindow
+            self.update_object_count()
 
         except Exception as e:
             QMessageBox.critical(self, "Query Failed", f"Failed to query Simbad: {str(e)}")
@@ -3380,6 +3471,7 @@ class MainWindow(QMainWindow):
             # Update the main preview with the query results
             self.main_preview.set_query_results(all_results)
             self.query_results = all_results  # Keep a reference to results in MainWindow
+            self.update_object_count()
             
         except Exception as e:
             QMessageBox.critical(self, "Vizier Search Failed", f"Failed to query Vizier: {str(e)}")
@@ -3463,6 +3555,7 @@ class MainWindow(QMainWindow):
             # Set query results in the CustomGraphicsView for display
             self.main_preview.set_query_results(query_results)
             self.query_results = query_results  # Keep a reference to results in MainWindow
+            self.update_object_count()
 
         except Exception as e:
             QMessageBox.critical(self, "MAST Query Failed", f"Failed to query MAST: {str(e)}")
@@ -3479,7 +3572,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Results cleared.")
 
     def open_settings_dialog(self):
-        """Open settings dialog to adjust max results and provide option to force a blind solve."""
+        """Open settings dialog to adjust max results and marker type."""
         dialog = QDialog(self)
         dialog.setWindowTitle("Settings")
         
@@ -3487,10 +3580,16 @@ class MainWindow(QMainWindow):
         
         # Max Results setting
         max_results_spinbox = QSpinBox()
-        max_results_spinbox.setRange(1, 25000)
+        max_results_spinbox.setRange(1, 100000)
         max_results_spinbox.setValue(self.max_results)
         layout.addRow("Max Results:", max_results_spinbox)
         
+        # Marker Style selection
+        marker_style_combo = QComboBox()
+        marker_style_combo.addItems(["Circle", "Crosshair"])
+        marker_style_combo.setCurrentText(self.marker_style)
+        layout.addRow("Marker Style:", marker_style_combo)
+
         # Force Blind Solve button
         force_blind_solve_button = QPushButton("Force Blind Solve")
         force_blind_solve_button.clicked.connect(lambda: self.force_blind_solve(dialog))
@@ -3498,12 +3597,19 @@ class MainWindow(QMainWindow):
         
         # OK and Cancel buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(lambda: self.update_max_results(max_results_spinbox.value(), dialog))
+        buttons.accepted.connect(lambda: self.update_settings(max_results_spinbox.value(), marker_style_combo.currentText(), dialog))
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         
         dialog.setLayout(layout)
         dialog.exec_()
+
+    def update_settings(self, max_results, marker_style, dialog):
+        """Update settings based on dialog input."""
+        self.max_results = max_results
+        self.marker_style = marker_style  # Store the selected marker style
+        self.main_preview.draw_query_results()
+        dialog.accept()
 
     def force_blind_solve(self, dialog):
         """Force a blind solve on the currently loaded image."""
